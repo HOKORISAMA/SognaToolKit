@@ -9,9 +9,9 @@ namespace ScriptTool
     // Jump reference tracking structure
     public struct JumpReference
     {
-        public int Address;
-        public int TargetAddress;
-        public string InstructionType;
+        public int Address { get; set; }
+        public int TargetAddress { get; set; }
+        public string InstructionType { get; set; }
 
         public JumpReference(int address, int targetAddress, string instructionType)
         {
@@ -20,12 +20,28 @@ namespace ScriptTool
             InstructionType = instructionType;
         }
     }
-
+	
+	public class StringMetadata
+	{
+		public long Address { get; set; }
+		public string Text { get; set; }
+		public int Type { get; set; }
+		public string NamePrefix { get; set; } // Store the injected name separately
+		
+		public StringMetadata(long address, string text, int type, string namePrefix = "")
+		{
+			Address = address;
+			Text = text;
+			Type = type;
+			NamePrefix = namePrefix;
+		}
+	}
+	
     public class Script
     {
         // Fields
         private string _disassembly = string.Empty;
-        private readonly List<(long Address, string Text, int Type)> _collectedStrings = new();
+        private readonly List<StringMetadata> _collectedStrings = new();
         private readonly List<JumpReference> _jumpReferences = new();
         private readonly Dictionary<byte, string> _textTokenTable = new();
 
@@ -45,7 +61,7 @@ namespace ScriptTool
 
         // Properties
         public string Disassembly => _disassembly;
-        public IReadOnlyList<(long Address, string Text, int Type)> CollectedStrings => _collectedStrings;
+        public IReadOnlyList<StringMetadata> CollectedStrings => _collectedStrings;
         public IReadOnlyList<JumpReference> JumpReferences => _jumpReferences;
         public IReadOnlyDictionary<byte, string> TextTokenTable => _textTokenTable;
         
@@ -192,6 +208,11 @@ namespace ScriptTool
         {
             _jumpReferences.Add(new JumpReference(address, (int)target, type));
         }
+		
+		private void AddStringMetaData(long address, string text, int type, string prefixName = "")
+		{
+			_collectedStrings.Add(new StringMetadata(address, text, type, prefixName));
+		}
         
         private void Parse(BinaryReader reader)
         {
@@ -345,7 +366,7 @@ namespace ScriptTool
         
         private void HandleJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_TO Target=0x{target:X4}");
@@ -353,7 +374,7 @@ namespace ScriptTool
         
         private void HandleOnInputJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "ON_INPUT_JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | ON_INPUT_JUMP_TO Target=0x{target:X4}");
@@ -361,7 +382,7 @@ namespace ScriptTool
         
         private void HandleRightClickJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "RIGHTCLICK_JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | RIGHTCLICK_JUMP_TO Target=0x{target:X4}");
@@ -441,8 +462,8 @@ namespace ScriptTool
 				_reader.ReadByte();
 				byte nameIdx = _reader.ReadByte();
 				if (_textTokenTable.TryGetValue(nameIdx, out var nameText))
-					// prefixNote = nameText;
-					prefixNote = "";
+					prefixNote = nameText;
+					// prefixNote = "";
 			}
 			
 			long stringOffset = _reader.BaseStream.Position; // capture actual string start
@@ -462,17 +483,18 @@ namespace ScriptTool
 					
 					switch (word)
 					{
-						case 0x814F: // Clear
+						case 0x814F: // Clear ('＾')
+							textBuilder.Append(_encoding.GetString(new byte[] { b, b2 }));
 							break;
-						case 0x818F: // Newline
-							textBuilder.Append('\n');
+						case 0x818F: // Newline ('￥')
+							textBuilder.Append("\\n");
 							break;
 						case 0x8190: // Global string token
 							byte tokenId = _reader.ReadByte();
-							if (_textTokenTable.TryGetValue(tokenId, out var tokenText))
-								textBuilder.Append(tokenText);
+							// if (_textTokenTable.TryGetValue(tokenId, out var tokenText))
+								// textBuilder.Append(tokenText);
 							break;
-						default: // Double-byte character
+						default: // Double-byte character ( Normal sjis text processing)
 							textBuilder.Append(_encoding.GetString(new byte[] { b, b2 }));
 							break;
 					}
@@ -488,7 +510,7 @@ namespace ScriptTool
 				? text
 				: prefixNote + (string.IsNullOrEmpty(text) ? "" : " " + text);
 				
-			_collectedStrings.Add((stringOffset, resolvedText, 0)); // use actual string offset
+			AddStringMetaData(stringOffset, text, 0, prefixNote); // use actual string offset
 			_sb.AppendLine($"{_currentAddress:X8} | DISPLAY_TEXT Text=\"{text}\"");
 		}
 
@@ -511,17 +533,17 @@ namespace ScriptTool
 
 			long stringOffset = _reader.BaseStream.Position; // remember string start
 			string text = _reader.ReadNullTerminatedString(_encoding);
-
+			
+			id = (byte)(id+1);
 			_textTokenTable[id] = text;
-			_collectedStrings.Add((stringOffset, text, 1)); // use stringOffset now
+			AddStringMetaData(stringOffset, text, 1); // use stringOffset now
 
 			_sb.AppendLine($"{_currentAddress:X8} | SET_TEXT_TOKEN ID={id}, Text=\"{text}\"");
 		}
 
-        
         private void HandleGoSubJump(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "GO_SUB_JUMP");
             _sb.AppendLine($"{_currentAddress:X8} | GO_SUB_JUMP Target=0x{target:X4}");
@@ -531,8 +553,8 @@ namespace ScriptTool
         {
             _sb.AppendLine($"{_currentAddress:X8} | RETURN");
         }
-        
-        private void HandleOpcode27(byte opcode)
+		
+		private void HandleOpcode27(byte opcode)
         {
             byte b = _reader.ReadByte();
             _sb.AppendLine($"{_currentAddress:X8} | OPCODE_27 Param={b}");
@@ -553,7 +575,7 @@ namespace ScriptTool
         
         private void HandleExitJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "EXIT_JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | EXIT_JUMP_TO Target=0x{target:X4}");
@@ -566,7 +588,7 @@ namespace ScriptTool
         
         private void HandleLoadJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "LOAD_JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | LOAD_JUMP_TO Target=0x{target:X4}");
@@ -586,7 +608,7 @@ namespace ScriptTool
         {
             byte reg = _reader.ReadByte();
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_EQUAL");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_EQUAL Reg={reg}, Value={value}, Target=0x{target:X4}");
@@ -596,7 +618,7 @@ namespace ScriptTool
         {
             byte reg = _reader.ReadByte();
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_NOT_EQUAL");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_NOT_EQUAL Reg={reg}, Value={value}, Target=0x{target:X4}");
@@ -606,7 +628,7 @@ namespace ScriptTool
         {
             byte reg = _reader.ReadByte();
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_LESS_THAN_OR_EQUAL");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_LESS_THAN_OR_EQUAL Reg={reg}, Value={value}, Target=0x{target:X4}");
@@ -616,7 +638,7 @@ namespace ScriptTool
         {
             byte reg = _reader.ReadByte();
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_GREATER_THAN_OR_EQUAL");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_GREATER_THAN_OR_EQUAL Reg={reg}, Value={value}, Target=0x{target:X4}");
@@ -631,7 +653,7 @@ namespace ScriptTool
         private void HandleJumpIfLastReadNotEqual(byte opcode) 
         {
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_LAST_READ_NOT_EQUAL"); 
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_LAST_READ_NOT_EQUAL Value={value}, Target=0x{target:X4}");
@@ -724,8 +746,8 @@ namespace ScriptTool
 					byte tokenId = _reader.ReadByte();
 					text = _reader.ReadNullTerminatedString(_encoding);
 
-					if (_textTokenTable.TryGetValue(tokenId, out var tokenText))
-						text = tokenText + (string.IsNullOrEmpty(text) ? "" : " " + text);
+					// if (_textTokenTable.TryGetValue(tokenId, out var tokenText))
+						// text = tokenText + (string.IsNullOrEmpty(text) ? "" : " " + text);
 				}
 				else
 				{
@@ -733,7 +755,7 @@ namespace ScriptTool
 				}
 
 				choices.Add(text);
-				_collectedStrings.Add((stringOffset, text, 2)); // store actual string offset
+				AddStringMetaData(stringOffset, text, 2); // store actual string offset
 			}
 
 			_sb.AppendLine($"{_currentAddress:X8} | DISPLAY_CHOICE_TEXT B1={b1}, W1={w1}, W2={w2}, B2={b2}, ChoiceCount={choiceCount}, Choices=[{string.Join("; ", choices)}]");
@@ -802,7 +824,7 @@ namespace ScriptTool
         private void HandleJumpIfLastReadAndZero(byte opcode) 
         {
             ushort value = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_LAST_READ_AND_VALUE_EQUALS_ZERO");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_LAST_READ_AND_VALUE_EQUALS_ZERO Value={value}, Target=0x{target:X4}");
@@ -880,7 +902,7 @@ namespace ScriptTool
         
         private void HandleRepeatJumpTo(byte opcode) 
         {
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "REPEAT_JUMP_TO");
             _sb.AppendLine($"{_currentAddress:X8} | REPEAT_JUMP_TO Target=0x{target:X4}");
@@ -1051,7 +1073,7 @@ namespace ScriptTool
 				string text = _reader.ReadNullTerminatedString(_encoding);
 
 				choices.Add((addr, text));
-				_collectedStrings.Add((stringOffset, text, 2)); // store real string offset
+				AddStringMetaData(stringOffset, text, 2); // store real string offset
 			}
 
 			_sb.AppendLine($"{_currentAddress:X8} | DISPLAY_CHOICE_TEXT_WITH_ADDRESSES B1={b1}, W1={w1}, W2={w2}, ChoiceCount={choiceCount}");
@@ -1083,7 +1105,7 @@ namespace ScriptTool
         private void HandleJumpIfBufferPropertyNotZero(byte opcode)
         {
             byte id = _reader.ReadByte();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_BUFFER_PROPERTY_NOT_ZERO");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_BUFFER_PROPERTY_NOT_ZERO ID={id}, Target=0x{target:X4}");
@@ -1100,7 +1122,7 @@ namespace ScriptTool
         {
             byte reg1 = _reader.ReadByte();
             byte reg2 = _reader.ReadByte();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_EQUAL_REGISTER");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_EQUAL_REGISTER Reg1={reg1}, Reg2={reg2}, Target=0x{target:X4}");
@@ -1110,7 +1132,7 @@ namespace ScriptTool
         {
             byte reg1 = _reader.ReadByte();
             byte reg2 = _reader.ReadByte();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_NOT_EQUAL_REGISTER");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_NOT_EQUAL_REGISTER Reg1={reg1}, Reg2={reg2}, Target=0x{target:X4}");
@@ -1120,7 +1142,7 @@ namespace ScriptTool
         {
             byte reg1 = _reader.ReadByte();
             byte reg2 = _reader.ReadByte();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER_LESS_THAN_OR_EQUAL_REGISTER");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER_LESS_THAN_OR_EQUAL_REGISTER Reg1={reg1}, Reg2={reg2}, Target=0x{target:X4}");
@@ -1130,7 +1152,7 @@ namespace ScriptTool
         {
             byte reg1 = _reader.ReadByte();
             byte reg2 = _reader.ReadByte();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_REGISTER1_GREATER_THAN_OR_EQUAL_REGISTER2");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_REGISTER1_GREATER_THAN_OR_EQUAL_REGISTER2 Reg1={reg1}, Reg2={reg2}, Target=0x{target:X4}");
@@ -1177,7 +1199,7 @@ namespace ScriptTool
         private void HandleJumpIfNotZero(byte opcode)
         {
             ushort mask = _reader.ReadUInt16();
-			ushort jumpPos = (ushort)_reader.BaseStream.Position;
+			int jumpPos = (int)_reader.BaseStream.Position;
             ushort target = _reader.ReadUInt16();
             AddJumpReference(jumpPos, target, "JUMP_IF_NOT_ZERO");
             _sb.AppendLine($"{_currentAddress:X8} | JUMP_IF_NOT_ZERO Mask=0x{mask:X4}, Target=0x{target:X4}");
@@ -1191,43 +1213,15 @@ namespace ScriptTool
             _sb.AppendLine($"{_currentAddress:X8} | LOAD_BMP_IN_MEMORY X={offsetX}, Y={offsetY}, File=\"{bmpName}\"");
         }
 		
-		public static Dictionary<long, string> LoadTranslations(string filePath)
-        {
-            var translations = new Dictionary<long, string>();
-            
-            if (!File.Exists(filePath))
-                return translations;
-            
-            foreach (var line in File.ReadLines(filePath, Encoding.UTF8))
-            {
-                var trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed) || !trimmed.Contains("◆"))
-                    continue;
-                
-                var parts = trimmed.Split('◆');
-                if (parts.Length >= 3)
-                {
-                    if (long.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out long address))
-                    {
-                        translations[address] = parts[2];
-                    }
-                }
-            }
-            
-            return translations;
-        }
-		
 		public void ImportText(string originalFilePath, string translationFilePath, 
-                       string? outputFilePath = null, Encoding? encoding = null)
+                       string? outputFilePath = null, Encoding? encoding = null, int maxLineLength = 50)
 		{
 			encoding ??= _encoding;
 			outputFilePath ??= originalFilePath;
 
+			// Load translations
 			Console.WriteLine($"Loading translations from: {translationFilePath}");
-			var translations = LoadTranslations(translationFilePath);
-
-			Console.WriteLine($"Loading script from: {originalFilePath}");
-			Load(originalFilePath, encoding);
+			var translations = Translation.LoadTranslations(translationFilePath);
 
 			if (translations.Count == 0)
 			{
@@ -1236,13 +1230,29 @@ namespace ScriptTool
 			}
 
 			Console.WriteLine($"Found {translations.Count} translations");
+
+			// Load original script
+			Console.WriteLine($"Loading script from: {originalFilePath}");
+			Load(originalFilePath, encoding);
+
 			Console.WriteLine($"Found {_jumpReferences.Count} jump references");
 			Console.WriteLine($"Found {_collectedStrings.Count} strings in script");
 
+			// Read original file bytes
 			var fileBytes = File.ReadAllBytes(originalFilePath);
 			Console.WriteLine($"Original file size: {fileBytes.Length:N0} bytes");
 
-			// Calculate size changes safely
+			// Apply auto line break only to translations that differ from original
+			foreach (var key in translations.Keys.ToList())
+			{
+				string originalText = ReadOriginalStringAt(fileBytes, key, encoding);
+				if (translations[key] != originalText)
+				{
+					translations[key] = Translation.AutoLineBreak(translations[key], maxLineLength);
+				}
+			}
+
+			// Calculate size changes
 			var sizeChanges = CalculateSizeChanges(translations, fileBytes, encoding);
 
 			if (sizeChanges.Count == 0)
@@ -1256,16 +1266,17 @@ namespace ScriptTool
 			var totalSizeChange = sizeChanges.Values.Sum();
 			Console.WriteLine($"Total size change: {totalSizeChange:+0;-#} bytes");
 
-			// Create backup for safety
+			// Backup original bytes
 			var originalFileBackup = (byte[])fileBytes.Clone();
 
-			// Update jump references first
+			// Update jump references safely
 			UpdateJumpReferencesSafe(fileBytes, sizeChanges);
 
 			// Compute new file size
 			var newFileSize = fileBytes.Length + totalSizeChange;
 			var newFile = new byte[newFileSize];
 
+			// Apply translations
 			if (!ApplyTranslationsSegmented(fileBytes, newFile, translations, sizeChanges, encoding))
 			{
 				Console.WriteLine("ERROR: Failed to apply translations, restoring original");
@@ -1277,6 +1288,7 @@ namespace ScriptTool
 			if (!string.IsNullOrEmpty(outputDir))
 				Directory.CreateDirectory(outputDir);
 
+			// Save translated file
 			File.WriteAllBytes(outputFilePath, newFile);
 
 			Console.WriteLine($"Saved translated script: {outputFilePath}");
@@ -1285,15 +1297,15 @@ namespace ScriptTool
 			Console.WriteLine($"   Size change: {(newFile.Length - fileBytes.Length):+0;-#} bytes");
 		}
 
-		private Dictionary<long, int> CalculateSizeChanges(Dictionary<long, string> translations, 
-				byte[] fileBytes, Encoding encoding)
+
+		private Dictionary<long, int> CalculateSizeChanges(Dictionary<long, string> translations, byte[] fileBytes, Encoding encoding)
 		{
 			var sizeChanges = new Dictionary<long, int>();
 
 			foreach (var kvp in translations)
 			{
-				var address = kvp.Key;
-				var translatedText = kvp.Value;
+				long address = kvp.Key;
+				string translatedText = kvp.Value;
 
 				if (address >= fileBytes.Length)
 				{
@@ -1301,8 +1313,8 @@ namespace ScriptTool
 					continue;
 				}
 
-				var originalText = ReadOriginalStringAt(fileBytes, address, encoding);
-				if (translatedText == originalText)
+				string originalText = ReadOriginalStringAt(fileBytes, address, encoding);
+				if (translatedText == originalText) 
 					continue;
 
 				int originalSize = encoding.GetByteCount(originalText) + 1;
@@ -1316,13 +1328,6 @@ namespace ScriptTool
 				{
 					Console.WriteLine($"ERROR: Cannot encode translated string at 0x{address:X8}");
 					continue;
-				}
-
-				// Ensure even length for SJIS
-				if (translatedBytes.Length % 2 != 0)
-				{
-					translatedText += " ";
-					translatedBytes = encoding.GetBytes(translatedText);
 				}
 
 				int translatedSize = translatedBytes.Length + 1;
@@ -1345,7 +1350,6 @@ namespace ScriptTool
 				if (addr >= sourceBytes.Length)
 					continue;
 
-				// Copy bytes before string
 				int copyLen = (int)(addr - sourcePos);
 				if (copyLen > 0)
 				{
@@ -1354,7 +1358,6 @@ namespace ScriptTool
 					targetPos += copyLen;
 				}
 
-				// Apply translation
 				if (!translations.TryGetValue(addr, out var translatedText))
 				{
 					Console.WriteLine($"WARNING: Translation missing for 0x{addr:X8}");
@@ -1362,12 +1365,6 @@ namespace ScriptTool
 				}
 
 				byte[] translatedBytes = encoding.GetBytes(translatedText);
-
-				if (translatedBytes.Length % 2 != 0)
-				{
-					translatedText += " ";
-					translatedBytes = encoding.GetBytes(translatedText);
-				}
 
 				if (targetPos + translatedBytes.Length + 1 > targetBytes.Length)
 				{
@@ -1379,11 +1376,9 @@ namespace ScriptTool
 				targetPos += translatedBytes.Length;
 				targetBytes[targetPos++] = 0x00;
 
-				// Move sourcePos past original string
 				sourcePos += GetOriginalStringLength(sourceBytes, (int)addr);
 			}
 
-			// Copy remaining bytes
 			int remaining = sourceBytes.Length - sourcePos;
 			if (remaining > 0)
 				Array.Copy(sourceBytes, sourcePos, targetBytes, targetPos, remaining);
@@ -1393,37 +1388,21 @@ namespace ScriptTool
 
 		private string ReadOriginalStringAt(byte[] fileBytes, long address, Encoding encoding)
 		{
-			var stringBytes = new List<byte>();
-			for (long i = address; i < fileBytes.Length; i++)
-			{
-				byte b = fileBytes[i];
-				if (b == 0x00) break;
-				stringBytes.Add(b);
-			}
+			int start = (int)address;
+			int end = Array.IndexOf(fileBytes, (byte)0x00, start);
+			if (end < 0) end = fileBytes.Length; // No null terminator found
 
-			try
-			{
-				return encoding.GetString(stringBytes.ToArray());
-			}
-			catch
-			{
-				return encoding.GetString(stringBytes.ToArray());
-			}
+			int length = end - start;
+			return encoding.GetString(fileBytes, start, length);
 		}
+
 
 		private int GetOriginalStringLength(byte[] fileBytes, int address)
 		{
-			int length = 0;
-			for (int i = address; i < fileBytes.Length; i++)
-			{
-				length++;
-				if (fileBytes[i] == 0x00)
-					break;
-			}
-			return length;
+			int endIndex = Array.IndexOf(fileBytes, (byte)0x00, address);
+			return (endIndex >= 0) ? endIndex - address + 1 : fileBytes.Length - address;
 		}
 
-		// Updated jump updater: no longer adds +1
 		private void UpdateJumpReferencesSafe(byte[] fileBytes, Dictionary<long, int> sizeChanges)
 		{
 			if (_jumpReferences.Count == 0 || sizeChanges.Count == 0)
@@ -1453,7 +1432,6 @@ namespace ScriptTool
 
 			foreach (var jump in _jumpReferences)
 			{
-				// jump.Address now points to the 2-byte target itself
 				if (jump.Address < 0 || jump.Address + 2 > fileBytes.Length)
 					continue;
 
@@ -1471,16 +1449,35 @@ namespace ScriptTool
 		
 		public void ExportText(string filePath)
 		{
-			using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
-			foreach (var (address, text, type) in _collectedStrings)
+			if (_collectedStrings == null || _collectedStrings.Count == 0)
 			{
-				if ((type == 0 || type == 1 || type == 2) && !string.IsNullOrEmpty(text))
-				{
-					writer.WriteLine($"◇{address:X8}◇{text}");
-					writer.WriteLine($"◆{address:X8}◆{text}");
-					writer.WriteLine();
-				}
+				Console.WriteLine("No strings to export.");
+				return;
 			}
+
+			int exportedCount = 0;
+
+			using var writer = new StreamWriter(filePath, false, new UTF8Encoding(false)); // UTF-8 without BOM
+
+			foreach (var meta in _collectedStrings)
+			{
+				// Skip invalid types or empty text
+				if (meta.Text is null or "" || (meta.Type != 0 && meta.Type != 1 && meta.Type != 2))
+					continue;
+
+				string text = meta.Text.EscapeText();
+				string name = string.IsNullOrEmpty(meta.NamePrefix)
+					? string.Empty
+					: $"|{meta.NamePrefix.EscapeText()}|";
+
+				writer.WriteLine($"◇{meta.Address:X8}◇{name}{text}");
+				writer.WriteLine($"◆{meta.Address:X8}◆{name}{text}");
+				writer.WriteLine();
+
+				exportedCount++;
+			}
+
+			Console.WriteLine($"Exported {exportedCount} string(s) to {Path.GetFileName(filePath)}");
 		}
     }
 }
