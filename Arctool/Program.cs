@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using ArcTool;
 
@@ -37,6 +37,16 @@ class Program
                         return;
                     }
                     PackFolder(tool, args[1], args[2]);
+                    break;
+
+                case "patch":
+                    if (args.Length < 3)
+                    {
+                        Console.WriteLine("Error: Missing arguments for patch.");
+                        ShowUsage();
+                        return;
+                    }
+                    PatchArchive(tool, args[1], args[2]);
                     break;
 
                 default:
@@ -78,10 +88,34 @@ class Program
         Console.WriteLine("Packing completed successfully.");
     }
 
+    static void PatchArchive(ArcTool.ArcTool tool, string archiveFile, string patchFolder)
+    {
+        if (!File.Exists(archiveFile))
+        {
+            Console.WriteLine($"Error: Archive file '{archiveFile}' does not exist.");
+            return;
+        }
+
+        if (!Directory.Exists(patchFolder))
+        {
+            Console.WriteLine($"Error: Patch folder '{patchFolder}' does not exist.");
+            return;
+        }
+
+        Console.WriteLine($"Patching '{archiveFile}' using '{patchFolder}'...");
+        tool.Patch(archiveFile, patchFolder);
+        Console.WriteLine("Patch applied successfully.");
+    }
+
     static void ShowUsage()
     {
         Console.WriteLine("Usage:");
         Console.WriteLine("  ArcTool extract <archive-file> <output-folder>");
         Console.WriteLine("  ArcTool pack <input-folder> <output-file>");
+        Console.WriteLine("  ArcTool patch <archive-file> <patch-folder>");
+        Console.WriteLine("\nExamples:");
+        Console.WriteLine("  ArcTool extract data.arc extracted");
+        Console.WriteLine("  ArcTool pack extracted new_data.arc");
+        Console.WriteLine("  ArcTool patch data.arc patch_folder");
     }
 }
