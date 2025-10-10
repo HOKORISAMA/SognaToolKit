@@ -12,6 +12,7 @@ namespace ArcTool
         public required byte[] Data { get; set; }
         public required byte[] PackedData { get; set; }
         public required uint Offset { get; set; }
+        public uint PosOffset { get; set; } // Index position in the archive
 
         // Computed properties
         public uint Size => (uint)(IsPacked ? PackedData.Length : Data.Length);
@@ -36,9 +37,9 @@ namespace ArcTool
                 if (!string.IsNullOrEmpty(dir))
                     Directory.CreateDirectory(dir);
 
-				file.Seek(entry.Offset, SeekOrigin.Begin);
-				byte[] data = new byte[entry.Size];
-				file.ReadExactly(data); // Reads exactly data.Length bytes or throws
+                file.Seek(entry.Offset, SeekOrigin.Begin);
+                byte[] data = new byte[entry.Size];
+                file.ReadExactly(data);
 
                 if (entry.IsPacked)
                 {
@@ -91,6 +92,7 @@ namespace ArcTool
                     Name = name,
                     IsPacked = isPacked,
                     Offset = offset,
+                    PosOffset = (uint)indexOffset,
                     Data = new byte[unpackedSize],
                     PackedData = new byte[size]
                 };
@@ -152,76 +154,69 @@ namespace ArcTool
 
         // -------------------- PACKER --------------------
         public void Pack(string inputFolder, string outputFile, bool compress = false)
-		{
-			var entries = new List<Entry>();
+        {
+            var entries = new List<Entry>();
 
-			foreach (var filePath in Directory.GetFiles(inputFolder, "*.*", SearchOption.AllDirectories))
-			{
-				byte[] data = File.ReadAllBytes(filePath);
-				byte[] packedData = compress ? LzPack(data) : data;
+            foreach (var filePath in Directory.GetFiles(inputFolder, "*.*", SearchOption.AllDirectories))
+            {
+                byte[] data = File.ReadAllBytes(filePath);
+                byte[] packedData = compress ? LzPack(data) : data;
 
-				var entry = new Entry
-				{
-					Name = Path.GetRelativePath(inputFolder, filePath).Replace("\\", "/"),
-					Data = data,
-					PackedData = packedData,
-					IsPacked = compress,
-					Offset = 0 // filled later
-				};
+                var entry = new Entry
+                {
+                    Name = Path.GetRelativePath(inputFolder, filePath).Replace("\\", "/"),
+                    Data = data,
+                    PackedData = packedData,
+                    IsPacked = compress,
+                    Offset = 0
+                };
 
-				entries.Add(entry);
-			}
+                entries.Add(entry);
+            }
 
-			using var fs = File.Create(outputFile);
-			using var writer = new BinaryWriter(fs, Encoding.UTF8);
+            using var fs = File.Create(outputFile);
+            using var writer = new BinaryWriter(fs, Encoding.UTF8);
 
-			// --- Header ---
-			// Write "SGS." + "DAT 1.00" + 0x00 padding up to 12 bytes total
-			writer.Write(Encoding.ASCII.GetBytes("SGS.DAT 1.00"));
-			if (fs.Position < 12)
-				writer.Write(new byte[12 - fs.Position]);
+            // --- Header ---
+            writer.Write(Encoding.ASCII.GetBytes("SGS.DAT 1.00"));
+            if (fs.Position < 12)
+                writer.Write(new byte[12 - fs.Position]);
 
-			writer.Write((uint)entries.Count);
+            writer.Write((uint)entries.Count);
 
-			long indexOffset = fs.Position;               // should now be 0x10
-			long dataOffset = indexOffset + entries.Count * 0x20;
+            long indexOffset = fs.Position;
+            long dataOffset = indexOffset + entries.Count * 0x20;
 
-			// --- Index ---
-			foreach (var entry in entries)
-			{
-				fs.Seek(indexOffset, SeekOrigin.Begin);
+            // --- Index ---
+            foreach (var entry in entries)
+            {
+                fs.Seek(indexOffset, SeekOrigin.Begin);
 
-				// name (0x00–0x0F)
-				byte[] nameBytes = new byte[0x10];
-				Encoding.UTF8.GetBytes(entry.Name, 0, Math.Min(entry.Name.Length, 16), nameBytes, 0);
-				writer.Write(nameBytes);
+                byte[] nameBytes = new byte[0x10];
+                Encoding.UTF8.GetBytes(entry.Name, 0, Math.Min(entry.Name.Length, 16), nameBytes, 0);
+                writer.Write(nameBytes);
 
-				// padding 0x10–0x12
-				writer.Write(new byte[3]);
+                writer.Write(new byte[3]);
+                writer.Write((byte)(entry.IsPacked ? 1 : 0));
+                writer.Write(entry.Size);
+                writer.Write(entry.UnpackedSize);
+                writer.Write((uint)dataOffset);
 
-				// isPacked (0x13)
-				writer.Write((byte)(entry.IsPacked ? 1 : 0));
+                entry.Offset = (uint)dataOffset;
 
-				// size, unpacked size, offset
-				writer.Write(entry.Size);
-				writer.Write(entry.UnpackedSize);
-				writer.Write((uint)dataOffset);
+                indexOffset += 0x20;
+                dataOffset += entry.Size;
+            }
 
-				entry.Offset = (uint)dataOffset;
+            // --- Data ---
+            foreach (var entry in entries)
+            {
+                fs.Seek(entry.Offset, SeekOrigin.Begin);
+                writer.Write(entry.IsPacked ? entry.PackedData : entry.Data);
+            }
 
-				indexOffset += 0x20;
-				dataOffset += entry.Size;
-			}
-
-			// --- Data ---
-			foreach (var entry in entries)
-			{
-				fs.Seek(entry.Offset, SeekOrigin.Begin);
-				writer.Write(entry.IsPacked ? entry.PackedData : entry.Data);
-			}
-
-			Console.WriteLine($"Packed {entries.Count} files into {outputFile}");
-		}
+            Console.WriteLine($"Packed {entries.Count} files into {outputFile}");
+        }
 
         private byte[] LzPack(byte[] input)
         {
@@ -261,6 +256,73 @@ namespace ArcTool
             }
 
             return output.ToArray();
+        }
+
+        // -------------------- PATCHER --------------------
+        public void Patch(string archiveFile, string patchFolder)
+        {
+            if (!File.Exists(archiveFile))
+                throw new FileNotFoundException($"Archive file '{archiveFile}' not found.");
+
+            if (!Directory.Exists(patchFolder))
+                throw new DirectoryNotFoundException($"Patch folder '{patchFolder}' not found.");
+
+            // Read existing entries
+            var entries = Unpack(archiveFile);
+            var patchFiles = Directory.GetFiles(patchFolder, "*.*", SearchOption.AllDirectories);
+            var matchedFiles = new List<string>();
+
+            using var datFile = new FileStream(archiveFile, FileMode.Open, FileAccess.ReadWrite);
+            using var writer = new BinaryWriter(datFile);
+
+            foreach (var patchFilePath in patchFiles)
+            {
+                string patchFileName = Path.GetFileName(patchFilePath);
+
+                foreach (var entry in entries)
+                {
+                    if (string.Equals(entry.Name.Trim(), patchFileName.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        matchedFiles.Add(patchFileName);
+                        Console.WriteLine($"File matched for patching: {patchFileName}");
+
+                        byte[] patchData = File.ReadAllBytes(patchFilePath);
+
+                        // Append new data to end of file
+                        datFile.Seek(0, SeekOrigin.End);
+                        uint newDataOffset = (uint)datFile.Position;
+                        datFile.Write(patchData);
+
+                        uint newSize = (uint)patchData.Length;
+
+                        // Update entry metadata
+                        entry.Data = patchData;
+                        entry.PackedData = patchData;
+                        entry.Offset = newDataOffset;
+                        entry.IsPacked = false;
+
+                        // Update index entry in archive
+                        datFile.Seek(entry.PosOffset + 0x13, SeekOrigin.Begin);
+                        writer.Write((byte)0); // isPacked = false
+
+                        datFile.Seek(entry.PosOffset + 0x14, SeekOrigin.Begin);
+                        writer.Write(newSize); // size
+
+                        datFile.Seek(entry.PosOffset + 0x18, SeekOrigin.Begin);
+                        writer.Write(newSize); // unpacked size
+
+                        datFile.Seek(entry.PosOffset + 0x1C, SeekOrigin.Begin);
+                        writer.Write(newDataOffset); // offset
+
+                        break;
+                    }
+                }
+            }
+
+            if (matchedFiles.Count == 0)
+                Console.WriteLine("No matching files found for patching.");
+            else
+                Console.WriteLine($"Total matched files: {matchedFiles.Count}");
         }
     }
 }
